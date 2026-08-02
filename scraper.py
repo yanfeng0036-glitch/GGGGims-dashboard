@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
-import google.generativeai as genai  # 引入 Google 官方包
+from google import genai  # 【修复1】使用全新的官方包
 
 TARGET_URL = "https://www.classaction.org/settlements"
 
@@ -41,7 +41,7 @@ def fetch_raw_data():
         print(f"网页抓取异常: {e}")
         return []
 
-def ai_parse_and_translate(item):
+def ai_parse_and_translate(item, client):
     prompt = f"""
     请分析以下索赔案件信息，并提取结构化字段：
     案件标题: {item['title']}
@@ -64,11 +64,10 @@ def ai_parse_and_translate(item):
     """
     
     try:
-        # 完全依照官方文档规范调用
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.1)
+        # 【修复2】使用新版客户端语法，并指定支持度最高的 gemini-2.5-flash
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
         )
         
         content = response.text.strip()
@@ -98,8 +97,8 @@ def main():
         print("错误: 找不到 AI_API_KEY 密钥！")
         return
         
-    # 按照官方文档：全局配置一次密钥即可
-    genai.configure(api_key=api_key)
+    # 初始化最新版客户端
+    client = genai.Client(api_key=api_key)
         
     raw_list = fetch_raw_data()
     if not raw_list:
@@ -109,11 +108,11 @@ def main():
     parsed_results = []
     
     for item in raw_list:
-        parsed = ai_parse_and_translate(item)
+        parsed = ai_parse_and_translate(item, client)
         if parsed and not parsed.get("is_expired", False):
             parsed_results.append(parsed)
             print(f"✅ 解析成功: {parsed.get('title', '未知')} | 总额: {parsed.get('total_fund_display', '未知')}")
-        time.sleep(3) # 遵守官方频率限制
+        time.sleep(4) 
     
     parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0) or 0, reverse=True)
     
