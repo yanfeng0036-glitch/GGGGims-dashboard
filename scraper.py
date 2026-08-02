@@ -38,7 +38,7 @@ def fetch_raw_data():
         return []
 
 def ai_parse_and_translate(item):
-    """原生直连 Gemini API 进行解析与翻译"""
+    """原生直连 Gemini API 进行解析与翻译 (带自动清理密钥功能)"""
     prompt = f"""
     请分析以下索赔案件信息，并提取结构化字段：
     案件标题: {item['title']}
@@ -60,7 +60,10 @@ def ai_parse_and_translate(item):
     }}
     """
     
-    api_key = os.getenv("AI_API_KEY")
+    # 获取密钥，并强制清理掉两端的所有空格、回车符和可能误填的引号
+    raw_key = os.getenv("AI_API_KEY", "")
+    api_key = raw_key.strip().replace('"', '').replace("'", "")
+    
     if not api_key:
         print("错误: 找不到 AI_API_KEY 密钥！")
         return None
@@ -73,15 +76,12 @@ def ai_parse_and_translate(item):
     headers = {"Content-Type": "application/json"}
     
     try:
-        # 直接通过原生接口发送请求
         response = std_requests.post(url, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
         
-        # 提取返回的内容
         content = data['candidates'][0]['content']['parts'][0]['text'].strip()
         
-        # 清理多余的 Markdown 标记确保 JSON 纯净
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
         if content.lower().startswith("json"):
@@ -104,9 +104,8 @@ def main():
         if parsed and not parsed.get("is_expired", False):
             parsed_results.append(parsed)
             print(f"✅ 解析成功: {parsed.get('title', '未知')} | 总额: {parsed.get('total_fund_display', '未知')}")
-        time.sleep(2) # 停顿2秒防止触发接口限流
+        time.sleep(2) 
     
-    # 按总金额降序排序
     parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0) or 0, reverse=True)
     
     output = {
