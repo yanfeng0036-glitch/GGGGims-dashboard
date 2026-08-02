@@ -1,4 +1,3 @@
-requests
+google-generativeai
 beautifulsoup4
 curl_cffi
-openai
