@@ -67,7 +67,7 @@ def ai_parse_and_translate(item):
     """
     try:
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model="gemini-1.5-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1
         )
