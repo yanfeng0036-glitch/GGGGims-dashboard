@@ -2,34 +2,28 @@ import os
 import json
 import time
 from datetime import datetime
-from curl_cffi import requests
+import requests as std_requests
+from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
-from openai import OpenAI
-
-# 初始化 AI 客户端 (自动从云端配置中获取 API 密钥)
-client = OpenAI(
-    api_key=os.getenv("AI_API_KEY"),
-    base_url=os.getenv("AI_BASE_URL", "https://api.deepseek.com") # 默认支持 DeepSeek，也可换 GPT
-)
 
 TARGET_URL = "https://www.classaction.org/settlements"
 
 def fetch_raw_data():
-    """使用模拟真实 Chrome 的底层请求，绕过 Cloudflare 防火墙"""
+    """使用 curl_cffi 绕过 Cloudflare 防火墙抓取数据"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     try:
-        response = requests.get(TARGET_URL, headers=headers, impersonate="chrome120", timeout=20)
+        response = curl_requests.get(TARGET_URL, headers=headers, impersonate="chrome120", timeout=30)
         if response.status_code != 200:
-            print(f"请求失败，状态码: {response.status_code}")
+            print(f"抓取网页失败，状态码: {response.status_code}")
             return []
         
         soup = BeautifulSoup(response.text, "html.parser")
         cards = soup.select(".card, .settlement-card, article.settlement")
         
         raw_items = []
-        for card in cards[:15]:  # 每次扫描最前沿的 15 个案件
+        for card in cards[:15]:  # 获取最新15条
             title = card.find(["h2", "h3", "h4"]).get_text(strip=True) if card.find(["h2", "h3", "h4"]) else ""
             desc = card.select_one(".description, p").get_text(strip=True) if card.select_one(".description, p") else ""
             link = card.find("a", href=True)["href"] if card.find("a", href=True) else ""
@@ -44,7 +38,7 @@ def fetch_raw_data():
         return []
 
 def ai_parse_and_translate(item):
-    """调用大模型提炼核心要素、清洗数据并翻译成中文"""
+    """原生直连 Gemini API 进行解析与翻译"""
     prompt = f"""
     请分析以下索赔案件信息，并提取结构化字段：
     案件标题: {item['title']}
@@ -58,26 +52,44 @@ def ai_parse_and_translate(item):
         "total_fund_usd": 数值 (案件总赔偿金额折合美元的数字，如 5000000。如果没提到或未知，必须填 0),
         "total_fund_display": "总金额显示文本 (如 '$5,000万' 或 '未披露')",
         "deadline": "截止日期 (格式如 YYYY-MM-DD，未知填 '近期')",
-        "is_expired": true/false (判断截止日期是否已经过期，已过期的填 true),
+        "is_expired": false,
         "is_consumer_goods": true/false (是否属于消费/购物/日用品类索赔),
         "no_proof_required": true/false (是否明确不需要购物发票/凭证),
         "no_invite_code": true/false (参与在线申领是否不需要邀请码/PIN，支持通用申领即为 true),
         "summary": "一句话中文摘要（30字以内，说明什么人能领什么钱）"
     }}
     """
+    
+    api_key = os.getenv("AI_API_KEY")
+    if not api_key:
+        print("错误: 找不到 AI_API_KEY 密钥！")
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1}
+    }
+    headers = {"Content-Type": "application/json"}
+    
     try:
-        response = client.chat.completions.create(
-            model="gemini-1.5-flash",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1
-        )
-        content = response.choices[0].message.content.strip()
-        # 清理可能存在的 markdown 代码块符号
+        # 直接通过原生接口发送请求
+        response = std_requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        # 提取返回的内容
+        content = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        
+        # 清理多余的 Markdown 标记确保 JSON 纯净
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        data = json.loads(content)
-        data["official_url"] = item["url"]
-        return data
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+            
+        parsed_data = json.loads(content)
+        parsed_data["official_url"] = item["url"]
+        return parsed_data
     except Exception as e:
         print(f"AI 解析错误: {e}")
         return None
@@ -89,16 +101,14 @@ def main():
     
     for item in raw_list:
         parsed = ai_parse_and_translate(item)
-        # 过滤规则：必须没过期
         if parsed and not parsed.get("is_expired", False):
             parsed_results.append(parsed)
-            print(f"✅ 解析成功: {parsed['title']} | 总额: {parsed['total_fund_display']}")
-        time.sleep(1) # 防频繁请求
+            print(f"✅ 解析成功: {parsed.get('title', '未知')} | 总额: {parsed.get('total_fund_display', '未知')}")
+        time.sleep(2) # 停顿2秒防止触发接口限流
     
-    # 核心排序逻辑：按总金额从大到小排序，未知/未披露的排在最后 (total_fund_usd 为 0 的排最后)
-    parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0), reverse=True)
+    # 按总金额降序排序
+    parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0) or 0, reverse=True)
     
-    # 保存为前端读取的 data.json
     output = {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "items": parsed_results
