@@ -1,133 +1,68 @@
-import os
-import json
-import time
-from datetime import datetime
-import requests as std_requests
-from curl_cffi import requests as curl_requests
-from bs4 import BeautifulSoup
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>全球消费者索赔情报仪表盘</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-800 p-4 md:p-8">
+    <div class="max-w-6xl mx-auto">
+        <header class="mb-8 border-b pb-4 flex justify-between items-center flex-wrap gap-4">
+            <div>
+                <h1 class="text-2xl md:text-3xl font-bold text-gray-900">🌐 美/加/澳 索赔案件实时监控</h1>
+                <p class="text-sm text-gray-500 mt-1">按案件总金额排序 | 自动高亮优质申领通道</p>
+            </div>
+            <div id="update-time" class="text-xs bg-gray-200 px-3 py-1 rounded-full text-gray-600">更新中...</div>
+        </header>
+        <div id="cards-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div class="col-span-full text-center py-12 text-gray-400">正在加载最新案件数据...</div>
+        </div>
+    </div>
+    <script>
+        async function loadData() {
+            try {
+                const res = await fetch('data.json');
+                const data = await res.json();
+                document.getElementById('update-time').innerText = '最后更新: ' + data.updated_at;
+                const container = document.getElementById('cards-container');
+                container.innerHTML = '';
+                if (!data.items || data.items.length === 0) {
+                    container.innerHTML = '<div class="col-span-full text-center py-12 text-gray-500">目前暂无未过期案件。</div>';
+                    return;
+                }
+                data.items.forEach(item => {
+                    let tagsHtml = '';
+                    if (item.is_consumer_goods) tagsHtml += '<span class="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded font-medium mr-1">🛒 消费购物类</span>';
+                    if (item.no_proof_required) tagsHtml += '<span class="bg-red-100 text-red-800 text-xs px-2 py-0.5 rounded font-bold mr-1">🔥 免凭证</span>';
+                    if (item.no_invite_code) tagsHtml += '<span class="bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded font-medium mr-1">🔓 免邀请码</span>';
 
-TARGET_URL = "https://www.classaction.org/settlements"
-
-def fetch_raw_data():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    }
-    try:
-        response = curl_requests.get(TARGET_URL, headers=headers, impersonate="chrome120", timeout=30)
-        if response.status_code != 200:
-            print(f"抓取网页失败，状态码: {response.status_code}")
-            return []
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        cards = soup.select(".card, .settlement-card, article.settlement")
-        
-        raw_items = []
-        for card in cards[:15]:
-            title_elem = card.find(["h2", "h3", "h4"])
-            title = title_elem.get_text(strip=True) if title_elem else ""
-            
-            desc_elem = card.select_one(".description, p")
-            desc = desc_elem.get_text(strip=True) if desc_elem else ""
-            
-            link_elem = card.find("a", href=True)
-            link = link_elem["href"] if link_elem else ""
-            if link.startswith("/"):
-                link = "https://www.classaction.org" + link
-            
-            if title and link:
-                raw_items.append({"title": title, "desc": desc, "url": link})
-        return raw_items
-    except Exception as e:
-        print(f"网页抓取异常: {e}")
-        return []
-
-def ai_parse_and_translate(item, api_key):
-    prompt = f"""
-    请分析以下索赔案件信息，并提取结构化字段：
-    案件标题: {item['title']}
-    详细描述: {item['desc']}
-
-    请按严格的 JSON 格式输出以下字段（不要包含任何 markdown 代码块标记，只返回纯 JSON）：
-    {{
-        "title": "中文案件名称",
-        "country": "US/CA/AU",
-        "payout_per_person": "预计单人赔偿金额 (如 $92.26，未知填'不明确')",
-        "total_fund_usd": 数值 (案件总赔偿金额折合美元的数字，如 5000000。如果没提到或未知，必须填 0),
-        "total_fund_display": "总金额显示文本 (如 '$5,000万' 或 '未披露')",
-        "deadline": "截止日期 (格式如 YYYY-MM-DD，未知填 '近期')",
-        "is_expired": false,
-        "is_consumer_goods": true/false (是否属于消费/购物/日用品类索赔),
-        "no_proof_required": true/false (是否明确不需要购物发票/凭证),
-        "no_invite_code": true/false (参与在线申领是否不需要邀请码/PIN，支持通用申领即为 true),
-        "summary": "一句话中文摘要（30字以内，说明什么人能领什么钱）"
-    }}
-    """
-    
-    # 适配最新标准 API 路由
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1}
-    }
-    headers = {"Content-Type": "application/json"}
-    
-    try:
-        response = std_requests.post(url, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"❌ Google API 拒绝请求! 状态码: {response.status_code}, 原因: {response.text}")
-            return None
-            
-        data = response.json()
-        content = data['candidates'][0]['content']['parts'][0]['text'].strip()
-        
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        if content.lower().startswith("json"):
-            content = content[4:].strip()
-            
-        parsed_data = json.loads(content)
-        parsed_data["official_url"] = item["url"]
-        return parsed_data
-        
-    except Exception as e:
-        print(f"JSON 解析异常 ({item['title'][:10]}...): {e}")
-        return None
-
-def main():
-    print("🚀 开始全网巡检与解析...")
-    
-    raw_key = os.getenv("AI_API_KEY", "")
-    api_key = "".join(raw_key.split()).replace('"', '').replace("'", "")
-    
-    if not api_key:
-        print("错误: 找不到 AI_API_KEY 密钥！请检查 GitHub Secrets。")
-        return
-        
-    raw_list = fetch_raw_data()
-    if not raw_list:
-        print("未能抓取到任何案件，请检查目标网站。")
-        return
-        
-    parsed_results = []
-    
-    for item in raw_list:
-        parsed = ai_parse_and_translate(item, api_key)
-        if parsed and not parsed.get("is_expired", False):
-            parsed_results.append(parsed)
-            print(f"✅ 解析成功: {parsed.get('title', '未知')} | 总额: {parsed.get('total_fund_display', '未知')}")
-        time.sleep(2) 
-    
-    parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0) or 0, reverse=True)
-    
-    output = {
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "items": parsed_results
-    }
-    
-    with open("data.json", "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f"💾 完美收工！共保留 {len(parsed_results)} 个有效案件，数据已推送到网页。")
-
-if __name__ == "__main__":
-    main()
+                    const card = `
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition p-5 flex flex-col justify-between">
+                            <div>
+                                <div class="flex justify-between items-start mb-2">
+                                    <span class="text-xs font-semibold px-2 py-0.5 bg-gray-100 text-gray-600 rounded">${item.country || 'US'}</span>
+                                    <span class="text-xs text-red-500 font-medium">⏳ 截止: ${item.deadline}</span>
+                                </div>
+                                <h2 class="font-bold text-lg text-gray-900 mb-2 leading-snug">${item.title}</h2>
+                                <div class="mb-3 flex flex-wrap gap-1">${tagsHtml}</div>
+                                <p class="text-sm text-gray-600 mb-4 line-clamp-3">${item.summary}</p>
+                            </div>
+                            <div>
+                                <div class="bg-gray-50 rounded-lg p-3 mb-4 grid grid-cols-2 gap-2 text-center">
+                                    <div><div class="text-xs text-gray-400">预估单人赔付</div><div class="text-base font-bold text-emerald-600">${item.payout_per_person}</div></div>
+                                    <div><div class="text-xs text-gray-400">总赔偿池</div><div class="text-base font-bold text-indigo-600">${item.total_fund_display}</div></div>
+                                </div>
+                                <a href="${item.official_url}" target="_blank" class="block w-full text-center bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-sm py-2 rounded-lg transition">前往申领 ↗</a>
+                            </div>
+                        </div>`;
+                    container.innerHTML += card;
+                });
+            } catch (err) {
+                document.getElementById('cards-container').innerHTML = '<div class="col-span-full text-center text-red-500 py-12">数据生成中，请等待后台执行完毕。</div>';
+            }
+        }
+        loadData();
+    </script>
+</body>
+</html>
