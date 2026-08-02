@@ -2,9 +2,9 @@ import os
 import json
 import time
 from datetime import datetime
-import requests as std_requests
 from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
+import google.generativeai as genai  # 引入 Google 官方包
 
 TARGET_URL = "https://www.classaction.org/settlements"
 
@@ -41,7 +41,7 @@ def fetch_raw_data():
         print(f"网页抓取异常: {e}")
         return []
 
-def ai_parse_and_translate(item, api_key):
+def ai_parse_and_translate(item):
     prompt = f"""
     请分析以下索赔案件信息，并提取结构化字段：
     案件标题: {item['title']}
@@ -63,25 +63,17 @@ def ai_parse_and_translate(item, api_key):
     }}
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1}
-    }
-    headers = {"Content-Type": "application/json"}
-    
     try:
-        # 原生暴力直连，抛弃所有第三方 SDK
-        response = std_requests.post(url, json=payload, headers=headers, timeout=30)
+        # 完全依照官方文档规范调用
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.1)
+        )
         
-        # 核心：如果被拒绝，直接把 Google 底层的明文原因打印出来！
-        if response.status_code != 200:
-            print(f"❌ Google API 拒绝请求! 状态码: {response.status_code}, 真实原因: {response.text}")
-            return None
-            
-        data = response.json()
-        content = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        content = response.text.strip()
         
+        # 清理可能存在的 Markdown 代码块标记
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
         if content.lower().startswith("json"):
@@ -92,19 +84,22 @@ def ai_parse_and_translate(item, api_key):
         return parsed_data
         
     except Exception as e:
-        print(f"JSON 解析异常 ({item['title'][:10]}...): {e}")
+        print(f"AI 解析异常 ({item['title'][:10]}...): {e}")
         return None
 
 def main():
     print("🚀 开始全网巡检与解析...")
     
-    # 终极洗键：暴力碾碎所有换行、空格和引号
+    # 提取并清理密钥
     raw_key = os.getenv("AI_API_KEY", "")
     api_key = "".join(raw_key.split()).replace('"', '').replace("'", "")
     
     if not api_key:
-        print("错误: 找不到 AI_API_KEY 密钥！请检查 GitHub Secrets。")
+        print("错误: 找不到 AI_API_KEY 密钥！")
         return
+        
+    # 按照官方文档：全局配置一次密钥即可
+    genai.configure(api_key=api_key)
         
     raw_list = fetch_raw_data()
     if not raw_list:
@@ -114,11 +109,11 @@ def main():
     parsed_results = []
     
     for item in raw_list:
-        parsed = ai_parse_and_translate(item, api_key)
+        parsed = ai_parse_and_translate(item)
         if parsed and not parsed.get("is_expired", False):
             parsed_results.append(parsed)
             print(f"✅ 解析成功: {parsed.get('title', '未知')} | 总额: {parsed.get('total_fund_display', '未知')}")
-        time.sleep(2) 
+        time.sleep(3) # 遵守官方频率限制
     
     parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0) or 0, reverse=True)
     
