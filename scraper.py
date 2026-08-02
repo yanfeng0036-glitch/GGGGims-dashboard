@@ -4,7 +4,8 @@ import time
 from datetime import datetime
 from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
-from google import genai  # 【修复1】使用全新的官方包
+from google import genai
+from google.genai import types
 
 TARGET_URL = "https://www.classaction.org/settlements"
 
@@ -41,7 +42,7 @@ def fetch_raw_data():
         print(f"网页抓取异常: {e}")
         return []
 
-def ai_parse_and_translate(item, client):
+def ai_parse_and_translate(item, client, retries=3):
     prompt = f"""
     请分析以下索赔案件信息，并提取结构化字段：
     案件标题: {item['title']}
@@ -63,33 +64,40 @@ def ai_parse_and_translate(item, client):
     }}
     """
     
-    try:
-        # 【修复2】使用新版客户端语法，并指定支持度最高的 gemini-2.5-flash
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        content = response.text.strip()
-        
-        # 清理可能存在的 Markdown 代码块标记
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        if content.lower().startswith("json"):
-            content = content[4:].strip()
+    for attempt in range(retries):
+        try:
+            # 强制使用官方最稳定模型
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.1)
+            )
             
-        parsed_data = json.loads(content)
-        parsed_data["official_url"] = item["url"]
-        return parsed_data
-        
-    except Exception as e:
-        print(f"AI 解析异常 ({item['title'][:10]}...): {e}")
-        return None
+            content = response.text.strip()
+            
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+            if content.lower().startswith("json"):
+                content = content[4:].strip()
+                
+            parsed_data = json.loads(content)
+            parsed_data["official_url"] = item["url"]
+            return parsed_data
+            
+        except Exception as e:
+            error_msg = str(e)
+            # 智能拦截 429 报错，自动沉睡恢复，绝不死机
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Quota" in error_msg:
+                print(f"  ⏳ [触发 Google 接口限流] 自动进入保护模式，等待 30 秒后重试... (第 {attempt+1}/{retries} 次)")
+                time.sleep(30)
+            else:
+                print(f"❌ AI 解析异常 ({item['title'][:10]}...): {e}")
+                return None
+    return None
 
 def main():
     print("🚀 开始全网巡检与解析...")
     
-    # 提取并清理密钥
     raw_key = os.getenv("AI_API_KEY", "")
     api_key = "".join(raw_key.split()).replace('"', '').replace("'", "")
     
@@ -97,7 +105,6 @@ def main():
         print("错误: 找不到 AI_API_KEY 密钥！")
         return
         
-    # 初始化最新版客户端
     client = genai.Client(api_key=api_key)
         
     raw_list = fetch_raw_data()
@@ -107,12 +114,16 @@ def main():
         
     parsed_results = []
     
-    for item in raw_list:
+    for idx, item in enumerate(raw_list):
+        print(f"正在处理 {idx+1}/{len(raw_list)}: {item['title'][:15]}...")
         parsed = ai_parse_and_translate(item, client)
+        
         if parsed and not parsed.get("is_expired", False):
             parsed_results.append(parsed)
             print(f"✅ 解析成功: {parsed.get('title', '未知')} | 总额: {parsed.get('total_fund_display', '未知')}")
-        time.sleep(4) 
+        
+        # 强制沉睡 15 秒，确保每分钟最多请求 4 次（完美避开 limit: 5 的死线）
+        time.sleep(15) 
     
     parsed_results.sort(key=lambda x: x.get("total_fund_usd", 0) or 0, reverse=True)
     
