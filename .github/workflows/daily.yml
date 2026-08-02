@@ -1,0 +1,36 @@
+name: Daily Settlements Monitor
+
+on:
+  schedule:
+    # 每天 UTC 时间 01:00 自动运行巡检 (相当于北京时间早上 9 点)
+    - cron: '0 1 * * *'
+  workflow_dispatch: # 支持在网页上手动随时点运行按钮
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v3
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 运行抓取与解析脚本
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+        run: python scraper.py
+
+      - name: 提交并推送更新后的数据
+        run: |
+          git config --global user.name "SettlementBot"
+          git config --global user.email "bot@github.com"
+          git add data.json
+          git commit -m "Auto-update settlements data" || exit 0
+          git push
